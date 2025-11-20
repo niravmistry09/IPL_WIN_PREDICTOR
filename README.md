@@ -38,8 +38,8 @@ Contains ball-by-ball data:
 - Runs scored  
 - Wickets  
 - Overs/balls  
-- Player dismissals  
-
+- Player dismissals
+  Note: Dataset available on Kaggle (file size >25 MB, so not uploaded here).
 
 
 🧠 Machine Learning Model  
