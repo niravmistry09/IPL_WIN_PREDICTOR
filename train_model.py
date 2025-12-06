@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 IPL Win Predictor - Model Training Script
 This script trains the machine learning model and saves it as a pickle file.
@@ -12,34 +13,40 @@ import pandas as pd
 import pickle
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.pipeline import Pipeline
 import os
+import sys
+
+# Fix encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
 
 def check_files():
     """Check if required CSV files exist"""
     if not os.path.exists('matches.csv'):
-        raise FileNotFoundError("❌ 'matches.csv' not found in current directory!")
+        raise FileNotFoundError("ERROR: 'matches.csv' not found in current directory!")
     if not os.path.exists('deliveries.csv'):
         raise FileNotFoundError(
-            "❌ 'deliveries.csv' not found!\n"
+            "ERROR: 'deliveries.csv' not found!\n"
             "Please download it from: https://www.kaggle.com/datasets/ramjidoolla/ipl-data-set\n"
             "Or use: https://data.world/raghu543/ipl-data-till-2017"
         )
-    print("✅ All required CSV files found!")
+    print("SUCCESS: All required CSV files found!")
 
 def load_data():
     """Load and prepare the datasets"""
-    print("\n📂 Loading datasets...")
+    print("\nLoading datasets...")
     match = pd.read_csv('matches.csv')
     dlvr = pd.read_csv('deliveries.csv')
-    print(f"✅ Loaded {len(match)} matches and {len(dlvr)} deliveries")
+    print(f"SUCCESS: Loaded {len(match)} matches and {len(dlvr)} deliveries")
     return match, dlvr
 
 def prepare_data(match, dlvr):
     """Prepare and clean the data"""
-    print("\n🔧 Preparing data...")
+    print("\nPreparing data...")
 
     # Calculate total scores
     total_score_df = dlvr.groupby(['match_id','inning']).sum()['total_runs'].reset_index()
@@ -83,12 +90,12 @@ def prepare_data(match, dlvr):
     # Filter only second innings
     dlvr_df = dlvr_df[dlvr_df['inning'] == 2]
 
-    print(f"✅ Prepared {len(dlvr_df)} delivery records")
+    print(f"SUCCESS: Prepared {len(dlvr_df)} delivery records")
     return dlvr_df
 
 def engineer_features(dlvr_df):
     """Create features for the model"""
-    print("\n⚙️ Engineering features...")
+    print("\nEngineering features...")
 
     # Current runs scored
     dlvr_df['current_runs'] = dlvr_df.groupby('match_id')['total_runs_y'].cumsum()
@@ -132,22 +139,57 @@ def engineer_features(dlvr_df):
         axis=1
     )
 
+    # NEW FEATURES FOR BETTER ACCURACY
+
+    # 1. Pressure Index (difference between RRR and CRR)
+    dlvr_df['pressure'] = dlvr_df['rrr'] - dlvr_df['crr']
+
+    # 2. Runs per wicket remaining
+    dlvr_df['runs_per_wicket'] = dlvr_df.apply(
+        lambda row: row['runs_left'] / row['wickets_left'] if row['wickets_left'] > 0 else row['runs_left'] * 10,
+        axis=1
+    )
+
+    # 3. Recent momentum (runs scored in last 3 overs)
+    dlvr_df['recent_runs'] = dlvr_df.groupby('match_id')['total_runs_y'].rolling(window=18, min_periods=1).sum().reset_index(0, drop=True)
+
+    # 4. Run rate difference
+    dlvr_df['run_rate_diff'] = dlvr_df['crr'] - dlvr_df['rrr']
+
+    # 5. Match situation (categorical: easy, moderate, tough, very tough)
+    def get_situation(row):
+        if row['wickets_left'] == 0:
+            return 'impossible'
+        rpo_required = row['runs_left'] / (row['balls_left'] / 6) if row['balls_left'] > 0 else 0
+        if rpo_required <= 6:
+            return 'easy'
+        elif rpo_required <= 9:
+            return 'moderate'
+        elif rpo_required <= 12:
+            return 'tough'
+        else:
+            return 'very_tough'
+
+    dlvr_df['situation'] = dlvr_df.apply(get_situation, axis=1)
+
     # Create result column (1 if batting team won, 0 otherwise)
     dlvr_df['result'] = dlvr_df.apply(
         lambda row: 1 if row['batting_team'] == row['winner'] else 0,
         axis=1
     )
 
-    print("✅ Features engineered successfully")
+    print("SUCCESS: Features engineered successfully (including advanced features)")
     return dlvr_df
 
 def prepare_final_dataset(dlvr_df):
     """Prepare final dataset for training"""
-    print("\n📊 Preparing final dataset...")
+    print("\nPreparing final dataset...")
 
     final_df = dlvr_df[[
         'batting_team', 'bowling_team', 'city', 'runs_left',
-        'balls_left', 'wickets', 'total_runs_x', 'crr', 'rrr', 'result'
+        'balls_left', 'wickets_left', 'total_runs_x', 'crr', 'rrr',
+        'pressure', 'runs_per_wicket', 'recent_runs', 'run_rate_diff', 'situation',
+        'result'
     ]]
 
     # Shuffle
@@ -159,12 +201,12 @@ def prepare_final_dataset(dlvr_df):
     # Remove rows where balls_left is 0
     final_df = final_df[final_df['balls_left'] != 0]
 
-    print(f"✅ Final dataset: {len(final_df)} records")
+    print(f"SUCCESS: Final dataset: {len(final_df)} records with enhanced features")
     return final_df
 
 def train_model(final_df):
     """Train the machine learning model"""
-    print("\n🤖 Training model...")
+    print("\nTraining multiple models to find the best one...")
 
     # Split features and target
     X = final_df.iloc[:, :-1]
@@ -178,39 +220,64 @@ def train_model(final_df):
     # Create preprocessing pipeline
     trf = ColumnTransformer([
         ('trf', OneHotEncoder(sparse_output=False, drop='first'),
-         ['batting_team', 'bowling_team', 'city'])
+         ['batting_team', 'bowling_team', 'city', 'situation'])
     ], remainder='passthrough')
 
-    # Create full pipeline
-    pipe = Pipeline(steps=[
-        ('step1', trf),
-        ('step2', LogisticRegression(solver='liblinear'))
-    ])
+    # Try multiple models
+    models = {
+        'Logistic Regression': LogisticRegression(solver='liblinear', max_iter=1000),
+        'Random Forest': RandomForestClassifier(n_estimators=100, max_depth=20, random_state=1, n_jobs=-1),
+        'Gradient Boosting': GradientBoostingClassifier(n_estimators=100, max_depth=5, random_state=1)
+    }
 
-    # Train
-    pipe.fit(X_train, y_train)
+    best_model = None
+    best_accuracy = 0
+    best_name = ""
 
-    # Evaluate
     from sklearn.metrics import accuracy_score
-    y_pred = pipe.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
 
-    print(f"✅ Model trained successfully!")
-    print(f"📈 Accuracy: {accuracy * 100:.2f}%")
+    print("\nComparing models:")
+    print("-" * 50)
 
-    return pipe
+    for name, model in models.items():
+        # Create pipeline
+        pipe = Pipeline(steps=[
+            ('preprocessor', trf),
+            ('classifier', model)
+        ])
+
+        # Train
+        pipe.fit(X_train, y_train)
+
+        # Evaluate
+        y_pred = pipe.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+
+        print(f"{name}: {accuracy * 100:.2f}%")
+
+        # Track best model
+        if accuracy > best_accuracy:
+            best_accuracy = accuracy
+            best_model = pipe
+            best_name = name
+
+    print("-" * 50)
+    print(f"\nBEST MODEL: {best_name}")
+    print(f"BEST ACCURACY: {best_accuracy * 100:.2f}%")
+
+    return best_model
 
 def save_model(model, filename='ipl_model.pkl'):
     """Save the trained model"""
-    print(f"\n💾 Saving model to '{filename}'...")
+    print(f"\nSaving model to '{filename}'...")
     with open(filename, 'wb') as f:
         pickle.dump(model, f)
-    print(f"✅ Model saved successfully!")
+    print(f"SUCCESS: Model saved successfully!")
 
 def main():
     """Main execution function"""
     print("=" * 60)
-    print("🏏 IPL WIN PREDICTOR - MODEL TRAINING")
+    print("IPL WIN PREDICTOR - MODEL TRAINING")
     print("=" * 60)
 
     try:
@@ -236,20 +303,20 @@ def main():
         save_model(model)
 
         print("\n" + "=" * 60)
-        print("✅ MODEL TRAINING COMPLETED SUCCESSFULLY!")
+        print("MODEL TRAINING COMPLETED SUCCESSFULLY!")
         print("=" * 60)
         print("\nYou can now run: streamlit run app.py")
 
     except FileNotFoundError as e:
-        print(f"\n❌ Error: {e}")
-        print("\n📥 To download deliveries.csv:")
+        print(f"\nERROR: {e}")
+        print("\nTo download deliveries.csv:")
         print("1. Visit: https://www.kaggle.com/datasets/ramjidoolla/ipl-data-set")
         print("2. Download the dataset")
         print("3. Extract 'deliveries.csv' to this folder")
         print("4. Run this script again")
 
     except Exception as e:
-        print(f"\n❌ An error occurred: {e}")
+        print(f"\nERROR: An error occurred: {e}")
         import traceback
         traceback.print_exc()
 
